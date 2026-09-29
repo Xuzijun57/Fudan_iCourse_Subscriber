@@ -61,9 +61,15 @@ jobs:
           sudo fc-cache -fv
 
       - name: Fetch database from data branch
+        id: db
         run: |
           mkdir -p data
-          git fetch origin data --depth=1
+          # A missing ``data`` branch is an ordinary precondition failure --
+          # the user simply has not had a successful "iCourse Check" run yet --
+          # not a crash.  A bare ``git fetch origin data`` aborts with a cryptic
+          # "fatal: couldn't find remote ref data" (exit 128) under ``bash -e``,
+          # so tolerate it here and report the real situation instead.
+          git fetch --depth=1 origin "+refs/heads/data:refs/remotes/origin/data" 2>/dev/null || true
           if git cat-file -e origin/data:data/icourse-index.enc 2>/dev/null; then
             mkdir -p data/sharded/shards
             git show origin/data:data/icourse-index.enc > data/sharded/icourse-index.enc
@@ -80,11 +86,14 @@ jobs:
             git show origin/data:data/icourse.db.enc > data/icourse.db.enc
             echo "Loaded legacy uncompressed database."
           else
-            echo "::error::No database found on data branch."
-            exit 1
+            echo "has_data=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No database on the 'data' branch yet. Run the 'iCourse Check' workflow once and let it finish before exporting. Nothing was exported; the remaining steps were skipped."
+            exit 0
           fi
+          echo "has_data=true" >> "$GITHUB_OUTPUT"
 
       - name: Decode database
+        if: steps.db.outputs.has_data == 'true'
         env:
           STUID: ${{ secrets.STUID }}
           UISPSW: ${{ secrets.UISPSW }}
@@ -122,6 +131,7 @@ jobs:
           echo "Database decrypted."
 
       - name: Export course summaries
+        if: steps.db.outputs.has_data == 'true'
         env:
           SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
