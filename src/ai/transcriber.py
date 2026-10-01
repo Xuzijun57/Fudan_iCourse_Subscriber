@@ -651,6 +651,10 @@ class Transcriber:
             cmd += ["-headers", http_headers]
         cmd += [
             "-reconnect", "1",
+            # See scheduler.AudioDownloader: without reconnect_at_eof a clean
+            # server-side close mid-lecture is mistaken for end-of-file.
+            "-reconnect_at_eof", "1",
+            "-reconnect_on_network_error", "1",
             "-reconnect_streamed", "1",
             "-reconnect_delay_max", "5",
             "-i", url,

@@ -193,13 +193,17 @@ class Database:
         return {row["sub_id"] for row in rows}
 
     def get_unprocessed_lectures(self, course_id: str | None = None,
-                                  max_errors: int = 3) -> list[dict]:
+                                  max_errors: int = 10) -> list[dict]:
         """Return lectures that need (re-)processing.
 
         Only returns lectures whose ``error_count`` is below *max_errors* —
         a permanently-failing lecture (e.g. ``get-sub-info`` RuntimeError
         for a removed recording) is abandoned after that many attempts
         rather than clogging every workflow run.
+
+        Raised from 3 to 10 because truncated video downloads fail
+        stochastically (~60 % per attempt): at 3 attempts ~22 % of
+        lectures were abandoned permanently, at 10 it is ~0.6 %.
         """
         query = (
             "SELECT * FROM lectures"

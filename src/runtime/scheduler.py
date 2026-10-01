@@ -219,6 +219,14 @@ class AudioDownloader:
                     "ffmpeg", "-y",
                     "-headers", headers,
                     "-reconnect", "1",
+                    # ``-reconnect`` only covers a disconnect *before* EOF.
+                    # The iCourse CDN/WebVPN sometimes closes the connection
+                    # cleanly part-way through a lecture; without this flag
+                    # ffmpeg treats that as a normal end-of-file and exits 0,
+                    # silently truncating the audio (~40 % of the lecture in
+                    # practice) and burning a retry attempt.
+                    "-reconnect_at_eof", "1",
+                    "-reconnect_on_network_error", "1",
                     "-reconnect_streamed", "1",
                     "-reconnect_delay_max", "5",
                     "-i", vpn_url,
