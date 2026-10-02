@@ -38,5 +38,6 @@ for title, lesson in TARGETS:
                 print('PLAYABLE URL', bool(client.get_video_url(cid, sid)), flush=True)
                 pages = client.get_ppt_list(cid, sid)
                 print('SOURCE PPT', len(pages), 'last_second', max((p['created_sec'] for p in pages), default=0), flush=True)
-                segments = client.get_transcript_segments(sid)
+                segments = client.get_transcript_segments(sid) or []
                 print('SOURCE TRANSCRIPT', len(segments), 'characters', sum(len(s.get('text', '')) for s in segments), flush=True)
+
