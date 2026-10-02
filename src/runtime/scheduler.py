@@ -7,11 +7,10 @@ LectureRunner can focus on per-lecture business logic.
   ocr_pool          8 workers   CPU bound (RapidOCR), gated by BoundedSemaphore(2)
   audio_downloader  2 slots     IO bound  (ffmpeg URL → audio.raw to disk)
 
-The audio downloader is special: each "slot" hosts a running ffmpeg process
-that writes f32le mono 16 kHz audio to a per-sub_id scratch file.  Transcriber
-reads that file with tail-f semantics while ffmpeg is still writing — so the
-network download isn't bottlenecked by ASR speed and the ASR isn't blocked
-on download completion.  See ``AudioDownloader`` below.
+Each audio slot first downloads and verifies a finite MP4 using HTTP ranges,
+then decodes it locally to a PCM scratch file. Transcriber tails the PCM while
+ffmpeg writes it. A truncated network response cannot masquerade as a complete
+recording. See ``AudioDownloader`` below.
 """
 
 from __future__ import annotations
@@ -131,6 +130,7 @@ class AudioHandle:
     path: str          # disk file ffmpeg writes f32le mono 16 kHz to
     process: subprocess.Popen
     stderr_chunks: list[bytes]
+    video_path: str = ''
 
 
 class _PendingSpawn:
@@ -139,19 +139,22 @@ class _PendingSpawn:
     the spawn thread detect that its entry was ``release()``-d (or replaced)
     in the meantime and abort instead of resurrecting a zombie entry."""
 
+    def __init__(self):
+        self.cancel = threading.Event()
+
+
+@dataclass
+class _SpawnFailure:
+    message: str
+
 
 class AudioDownloader:
-    """Spawn-and-track concurrent ``ffmpeg`` audio extractions.
+    """Download verified MP4s and track their local PCM extraction.
 
-    For each sub_id we spawn one ``ffmpeg -i <signed URL> -vn -ar 16000 -ac 1
-    -f f32le <path>`` process.  ``ffmpeg`` writes the decoded mono float32
-    audio straight to disk at network speed — no Python pipe in the loop, so
-    download is NOT bottlenecked by ASR consumption.  Transcriber reads that
-    file with tail-f semantics, processing chunks as they arrive.
-
-    Concurrency is bounded by ``max_concurrent`` (default 2: current lecture
-    being transcribed + one pre-decoded for the next lecture).  ``schedule()``
-    returns immediately; if all slots are taken the background spawn waits.
+    Concurrency covers both download and decode (default two slots). The MP4
+    is removed as soon as decoding ends; PCM remains until the caller releases
+    it. ``schedule()`` returns immediately and ``get()`` waits for decoding to
+    start. Pending downloads are cancellable.
     """
 
     def __init__(self, audio_dir: str, max_concurrent: int = None,
@@ -203,33 +206,34 @@ class AudioDownloader:
     def _spawn_when_ready(self, client, course_id: str, sub_id: str,
                           pending: _PendingSpawn):
         try:
-            self._sem.acquire()
+            while not self._sem.acquire(timeout=0.2):
+                if pending.cancel.is_set():
+                    return
             try:
-                url = client.get_video_url(course_id, sub_id)
-                if not url:
+                if pending.cancel.is_set():
+                    self._sem.release()
+                    return
+                video_path = os.path.join(self._dir, f'{sub_id}.mp4')
+                # Decode only a byte-complete local MP4. HTTP retries now
+                # resume validated ranges instead of re-decoding half a stream.
+                downloaded = client.download_lecture_video(
+                    course_id, sub_id, video_path, cancel=pending.cancel,
+                )
+                if not downloaded:
                     self._pop_if_mine(sub_id, pending)
                     self._sem.release()
                     return
-                vpn_url, headers = client.get_stream_params(url)
+                if pending.cancel.is_set():
+                    os.remove(video_path)
+                    self._sem.release()
+                    return
                 path = os.path.join(self._dir, f"{sub_id}.raw")
                 if os.path.exists(path):
                     os.remove(path)
 
                 cmd = [
-                    "ffmpeg", "-y",
-                    "-headers", headers,
-                    "-reconnect", "1",
-                    # ``-reconnect`` only covers a disconnect *before* EOF.
-                    # The iCourse CDN/WebVPN sometimes closes the connection
-                    # cleanly part-way through a lecture; without this flag
-                    # ffmpeg treats that as a normal end-of-file and exits 0,
-                    # silently truncating the audio (~40 % of the lecture in
-                    # practice) and burning a retry attempt.
-                    "-reconnect_at_eof", "1",
-                    "-reconnect_on_network_error", "1",
-                    "-reconnect_streamed", "1",
-                    "-reconnect_delay_max", "5",
-                    "-i", vpn_url,
+                    "ffmpeg", "-nostdin", "-nostats", "-y",
+                    "-i", video_path,
                     "-vn",
                     "-ar", "16000",
                     "-ac", "1",
@@ -254,6 +258,8 @@ class AudioDownloader:
                                 del stderr_chunks[: -1024]
                     except Exception:
                         pass
+                    finally:
+                        proc.stderr.close()
 
                 threading.Thread(
                     target=_drain, name=f"audio-stderr-{sub_id}",
@@ -263,6 +269,7 @@ class AudioDownloader:
                 handle = AudioHandle(
                     sub_id=sub_id, path=path,
                     process=proc, stderr_chunks=stderr_chunks,
+                    video_path=video_path,
                 )
 
                 # Install the handle — unless release() already removed our
@@ -287,6 +294,11 @@ class AudioDownloader:
                             os.remove(path)
                         except OSError:
                             pass
+                    if os.path.exists(video_path):
+                        try:
+                            os.remove(video_path)
+                        except OSError:
+                            pass
                     return
 
                 if self._reporter:
@@ -299,8 +311,15 @@ class AudioDownloader:
                     target=self._monitor, args=(handle,),
                     name=f"audio-monitor-{sub_id}", daemon=True,
                 ).start()
-            except Exception:
-                self._pop_if_mine(sub_id, pending)
+            except Exception as exc:
+                with self._lock:
+                    if self._active.get(sub_id) is pending:
+                        self._active[sub_id] = _SpawnFailure(str(exc))
+                if 'video_path' in locals() and os.path.exists(video_path):
+                    try:
+                        os.remove(video_path)
+                    except OSError:
+                        pass
                 self._sem.release()
                 raise
         except Exception as e:
@@ -309,13 +328,18 @@ class AudioDownloader:
 
     def _monitor(self, handle: AudioHandle):
         handle.process.wait()
+        if handle.video_path and os.path.exists(handle.video_path):
+            try:
+                os.remove(handle.video_path)
+            except OSError:
+                pass
         self._sem.release()
 
-    def get(self, sub_id: str, timeout: float = 120.0) -> AudioHandle | None:
-        """Block until ffmpeg has been spawned for sub_id; return its handle.
+    def get(self, sub_id: str, timeout: float = 1800.0) -> AudioHandle | None:
+        """Wait for a complete video download and the local decoder handle.
 
         Returns None if sub_id was never scheduled (or already released).
-        Raises TimeoutError if the spawn never happens within ``timeout``.
+        Raises RuntimeError on download failure or TimeoutError on the wait.
         """
         sub_id = str(sub_id)
         deadline = time.time() + timeout
@@ -324,6 +348,8 @@ class AudioDownloader:
                 entry = self._active.get(sub_id)
                 if entry is None:
                     return None
+                if isinstance(entry, _SpawnFailure):
+                    raise RuntimeError(entry.message)
                 if isinstance(entry, AudioHandle):
                     return entry
             if time.time() > deadline:
@@ -345,6 +371,8 @@ class AudioDownloader:
         sub_id = str(sub_id)
         with self._lock:
             handle = self._active.pop(sub_id, None)
+        if isinstance(handle, _PendingSpawn):
+            handle.cancel.set()
         if not isinstance(handle, AudioHandle):
             return
         proc = handle.process
