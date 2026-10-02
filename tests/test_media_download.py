@@ -90,8 +90,26 @@ class MediaDownloadTests(unittest.TestCase):
     def test_cancelled_download_removes_partial(self):
         cancel = threading.Event()
         cancel.set()
-        with self.assertRaises(DownloadCancelled):
-            self.run_download(b'x'*100, cancel=cancel)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'cancelled.mp4')
+            with self.assertRaises(DownloadCancelled):
+                download_ranges(lambda *args: None, lambda: None, path, cancel=cancel)
+            self.assertFalse(Path(path).exists())
+            self.assertFalse(Path(path+'.part').exists())
+
+    def test_network_failure_exhausts_bounded_retries(self):
+        calls = []
+        def failed(start, end):
+            calls.append(start)
+            raise requests.ConnectionError('simulated outage')
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'failed.mp4')
+            with self.assertRaisesRegex(RuntimeError, 'after 2 attempts'):
+                download_ranges(failed, lambda: None, path, max_attempts=2,
+                                log=lambda _: None)
+            self.assertEqual(len(calls), 2)
+            self.assertFalse(Path(path).exists())
+            self.assertFalse(Path(path+'.part').exists())
 
     def test_downloaded_media_decodes_to_full_duration(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -162,8 +162,8 @@ class AudioDownloader:
         self._dir = audio_dir
         self.max_concurrent = max_concurrent or config.VIDEO_DOWNLOAD_CONCURRENCY
         self._sem = threading.BoundedSemaphore(self.max_concurrent)
-        # sub_id -> AudioHandle (ready) | _PendingSpawn (spawn in flight)
-        self._active: dict[str, "AudioHandle | _PendingSpawn"] = {}
+        # A pending download, a ready local decoder, or a recorded failure.
+        self._active: dict[str, "AudioHandle | _PendingSpawn | _SpawnFailure"] = {}
         self._lock = threading.Lock()
         self._reporter = reporter
         os.makedirs(self._dir, exist_ok=True)
