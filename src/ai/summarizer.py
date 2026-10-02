@@ -2,7 +2,7 @@
 
 import time
 
-from openai import OpenAI
+from openai import AuthenticationError, OpenAI
 
 from src.runtime import config
 
@@ -87,6 +87,7 @@ class Summarizer:
             p["name"]: OpenAI(api_key=p["api_key"], base_url=p["base_url"])
             for p in self.providers
         }
+        self._unauthorized_providers: set[str] = set()
 
     def _call_llm(self, client: OpenAI, model: str,
                   title: str, content: str) -> str:
@@ -108,6 +109,8 @@ class Summarizer:
         if not response.choices:
             raise ValueError("API returned empty choices — likely content filter or quota exceeded")
         result = response.choices[0].message.content
+        if not isinstance(result, str) or not result.strip():
+            raise ValueError("API returned empty summary content")
         elapsed = time.time() - t0
         # Token usage helps explain run cost — every provider's billing is
         # token-based, and rate-limit decisions key off prompt size much
@@ -143,12 +146,21 @@ class Summarizer:
 
         errors = []
         for provider in self.providers:
+            if provider['name'] in self._unauthorized_providers:
+                errors.append(f"{provider['name']}: authentication previously failed in this run")
+                continue
             client = self._clients[provider["name"]]
             for model in provider["models"]:
                 model_id = f"{provider['name']}/{model}"
                 try:
                     result = self._call_llm(client, model, title, content)
                     return (result, model_id)
+                except AuthenticationError:
+                    self._unauthorized_providers.add(provider['name'])
+                    print(f"[Summarizer] {provider['name']} authentication failed; "
+                          "using another provider for this run")
+                    errors.append(f"{model_id}: authentication failed")
+                    break
                 except Exception as e:
                     print(f"[Summarizer] {model_id} failed: "
                           f"{type(e).__name__}: {e}")

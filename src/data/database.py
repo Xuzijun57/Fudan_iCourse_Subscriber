@@ -219,6 +219,15 @@ class Database:
             rows = self.conn.execute(query, params).fetchall()
         return [dict(row) for row in rows]
 
+    def get_exhausted_sub_ids(self, course_id: str, max_errors: int = 10) -> set[str]:
+        """Keep rediscovered recordings from bypassing the bounded retry policy."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT sub_id FROM lectures WHERE course_id = ? AND error_count >= ?",
+                (course_id, max_errors),
+            ).fetchall()
+        return {row['sub_id'] for row in rows}
+
     def update_transcript(self, sub_id: str, transcript: str):
         with self._lock, self.conn:
             self.conn.execute(

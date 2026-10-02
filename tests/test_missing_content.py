@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from src.data.database import Database
 from src.pipeline.lecture_runner import LectureRunner
@@ -24,6 +24,22 @@ class MissingContentTests(unittest.TestCase):
         runner = LectureRunner(Mock(), self.db, Mock(), Mock(), Mock(), Mock())
         runner._ppt = Mock()
         return runner
+
+    def test_rediscovery_cannot_bypass_retry_limit_but_retries_below_limit(self):
+        from main import _enumerate_lectures
+        client = Mock()
+        client.get_course_detail.return_value = {
+            'title': 'Test course', 'teacher': 'Teacher',
+            'lectures': [{'sub_id': 'lesson', 'sub_title': 'Test lesson',
+                          'date': '2026-09-24', 'has_playback': True}]}
+        self.db.conn.execute("UPDATE lectures SET error_count=10 WHERE sub_id='lesson'")
+        self.db.conn.commit()
+        with patch('main.config.COURSE_IDS', ['course']):
+            self.assertEqual(_enumerate_lectures(client, self.db, Mock()), [])
+            self.db.conn.execute("UPDATE lectures SET error_count=9 WHERE sub_id='lesson'")
+            self.db.conn.commit()
+            lectures = _enumerate_lectures(client, self.db, Mock())
+        self.assertEqual([lec[2]['sub_id'] for lec in lectures], ['lesson'])
 
     def test_legacy_processed_without_summary_is_requeued_and_uses_cached_transcript(self):
         self.db.update_transcript('lesson', 'Already transcribed course material')
