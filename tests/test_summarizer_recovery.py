@@ -2,7 +2,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-import httpx
 from openai import AuthenticationError
 from src.ai.summarizer import Summarizer
 
@@ -24,7 +23,7 @@ class SummarizerRecoveryTests(unittest.TestCase):
 
     def test_unauthorized_provider_is_skipped_for_remaining_lectures(self):
         summary = self.create()
-        response = httpx.Response(401, request=httpx.Request('POST', 'https://example.test'))
+        response = Mock(status_code=401, request=Mock(), headers={})
         failure = AuthenticationError('Invalid credential', response=response, body=None)
         summary._call_llm = Mock(side_effect=[failure, 'First notes', 'Second notes'])
         self.assertEqual(summary.summarize('Course', 'Lecture one'), ('First notes', 'second/c'))
