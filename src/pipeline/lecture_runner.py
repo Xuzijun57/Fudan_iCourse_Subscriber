@@ -146,10 +146,9 @@ class LectureRunner:
 
         # ── Phase F — bucketed-prompt LLM summary ──────────────────────
         if not transcript.strip():
-            self._reporter.info("    Empty transcript, skipping summary.")
+            self._reporter.info("    Empty transcript; recording a retryable transcription error.")
             self._release_audio(sub_id)
-            self._db.mark_processed(sub_id)
-            self._db.clear_error(sub_id)
+            self._db.update_error(sub_id, "transcribe", "No speech was transcribed from the recording")
             return None
 
         summary = self._summarize(
@@ -176,7 +175,7 @@ class LectureRunner:
     def _has_summary(existing: dict | None) -> bool:
         return bool(
             existing
-            and existing.get("summary")
+            and (existing.get("summary") or "").strip()
         )
 
     def prefetch_first(self, course_id: str, sub_id: str) -> None:
@@ -205,7 +204,7 @@ class LectureRunner:
         prefetching from spending a download slot (and a full lecture of
         bandwidth) on audio that would just be killed in Phase H."""
         existing = self._db.get_lecture(sub_id)
-        if existing and existing.get("transcript"):
+        if existing and (existing.get("transcript") or "").strip():
             return False
         if config.USE_OFFICIAL_TRANSCRIPT:
             try:
@@ -256,7 +255,7 @@ class LectureRunner:
         complete-enough (no >20 min silence gaps) it replaces the ASR
         step entirely, saving ~5 min of CPU time per lecture.
         """
-        if existing and existing.get("transcript"):
+        if existing and (existing.get("transcript") or "").strip():
             self._reporter.info(
                 f"    Transcript exists "
                 f"({len(existing['transcript'])} chars), "
@@ -325,7 +324,6 @@ class LectureRunner:
         except NoAudioStreamError as e:
             self._reporter.info(f"    [SKIP] Video-only (no audio stream): {e}")
             self._db.update_error(sub_id, "transcribe", str(e))
-            self._db.mark_processed(sub_id)
             self._release_audio(sub_id)
             return None, None
         except IncompleteAudioError as e:
@@ -365,6 +363,8 @@ class LectureRunner:
             summary, model_used = self._summarizer.summarize(
                 course_title, prompt_text,
             )
+            if not summary or not summary.strip():
+                raise RuntimeError("The summary provider returned empty content")
             self._reporter.info(
                 f"    [OK] Summary by {model_used}: {len(summary)} chars"
             )

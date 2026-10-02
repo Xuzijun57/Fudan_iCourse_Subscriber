@@ -187,7 +187,8 @@ class Database:
         """Return sub_ids that have been fully processed."""
         with self._lock:
             rows = self.conn.execute(
-                "SELECT sub_id FROM lectures WHERE course_id = ? AND processed_at IS NOT NULL",
+                "SELECT sub_id FROM lectures WHERE course_id = ?"
+                " AND processed_at IS NOT NULL AND TRIM(COALESCE(summary, '')) != ''",
                 (course_id,),
             ).fetchall()
         return {row["sub_id"] for row in rows}
@@ -207,7 +208,7 @@ class Database:
         """
         query = (
             "SELECT * FROM lectures"
-            " WHERE processed_at IS NULL"
+            " WHERE (processed_at IS NULL OR TRIM(COALESCE(summary, '')) = '')"
             "   AND (error_count IS NULL OR error_count < ?)"
         )
         params: tuple = (max_errors,)
@@ -256,6 +257,8 @@ class Database:
             self.conn.execute(
                 """UPDATE lectures
                    SET error_stage = ?, error_msg = ?,
+                       processed_at = CASE WHEN TRIM(COALESCE(summary, '')) = ''
+                                           THEN NULL ELSE processed_at END,
                        error_count = COALESCE(error_count, 0) + 1
                    WHERE sub_id = ?""",
                 (stage, error_msg, sub_id),

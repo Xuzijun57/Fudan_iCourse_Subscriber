@@ -88,23 +88,31 @@ def merge(local_path: str, remote_path: str):
             #    - Error fields: clear if processed, otherwise keep the most info
             conn.execute("""
                 UPDATE main.lectures SET
-                    transcript    = COALESCE(l.transcript,    main.lectures.transcript),
-                    summary       = COALESCE(l.summary,       main.lectures.summary),
+                    transcript    = CASE WHEN TRIM(COALESCE(l.transcript, '')) != ''
+                                         THEN l.transcript ELSE main.lectures.transcript END,
+                    summary       = CASE WHEN TRIM(COALESCE(l.summary, '')) != ''
+                                         THEN l.summary ELSE main.lectures.summary END,
                     summary_model = COALESCE(l.summary_model, main.lectures.summary_model),
-                    processed_at  = COALESCE(l.processed_at,  main.lectures.processed_at),
+                    processed_at  = CASE
+                        WHEN (TRIM(COALESCE(l.summary, '')) != '' OR TRIM(COALESCE(main.lectures.summary, '')) != '')
+                        THEN COALESCE(l.processed_at, main.lectures.processed_at)
+                        ELSE NULL END,
                     emailed_at    = COALESCE(l.emailed_at,    main.lectures.emailed_at),
                     error_msg = CASE
-                        WHEN COALESCE(l.processed_at, main.lectures.processed_at) IS NOT NULL
+                        WHEN (TRIM(COALESCE(l.summary, '')) != '' OR TRIM(COALESCE(main.lectures.summary, '')) != '')
+                             AND COALESCE(l.processed_at, main.lectures.processed_at) IS NOT NULL
                         THEN NULL
                         ELSE COALESCE(l.error_msg, main.lectures.error_msg)
                     END,
                     error_count = CASE
-                        WHEN COALESCE(l.processed_at, main.lectures.processed_at) IS NOT NULL
+                        WHEN (TRIM(COALESCE(l.summary, '')) != '' OR TRIM(COALESCE(main.lectures.summary, '')) != '')
+                             AND COALESCE(l.processed_at, main.lectures.processed_at) IS NOT NULL
                         THEN 0
                         ELSE MAX(COALESCE(l.error_count, 0), COALESCE(main.lectures.error_count, 0))
                     END,
                     error_stage = CASE
-                        WHEN COALESCE(l.processed_at, main.lectures.processed_at) IS NOT NULL
+                        WHEN (TRIM(COALESCE(l.summary, '')) != '' OR TRIM(COALESCE(main.lectures.summary, '')) != '')
+                             AND COALESCE(l.processed_at, main.lectures.processed_at) IS NOT NULL
                         THEN NULL
                         ELSE COALESCE(l.error_stage, main.lectures.error_stage)
                     END
