@@ -559,6 +559,30 @@ class ICourseClient:
         headers = f"Cookie: {cookies}\r\nUser-Agent: {config.USER_AGENT}\r\n"
         return vpn_url, headers
 
+    def download_lecture_video(self, course_id: str, sub_id: str,
+                               output_path: str, cancel=None) -> str | None:
+        """Fetch a complete MP4 with resumable, length-checked HTTP ranges."""
+        from src.api.media_download import download_ranges
+
+        url = self.get_video_url(course_id, sub_id)
+        if not url:
+            return None
+        vpn_url, _ = self.get_stream_params(url)
+
+        def refresh():
+            nonlocal vpn_url
+            renewed = self.get_video_url(course_id, sub_id)
+            if not renewed:
+                raise RuntimeError('Video URL unavailable while resuming download')
+            vpn_url, _ = self.get_stream_params(renewed)
+
+        def get_response(start, end):
+            return self.vpn.get_raw(vpn_url, stream=True, timeout=(15, 30),
+                headers={'Range': f'bytes={start}-{end}',
+                         'Accept-Encoding': 'identity'})
+
+        return download_ranges(get_response, refresh, output_path, cancel=cancel)
+
     def download_video(
         self,
         video_url: str,
