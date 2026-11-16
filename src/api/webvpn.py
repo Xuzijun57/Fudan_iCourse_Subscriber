@@ -805,25 +805,48 @@ class WebVPNSession:
         print("    Ticket extracted.")
         return ticket_url
 
+    def _has_ticket_cookie(self) -> bool:
+        """True when the WebVPN session cookie has actually been issued."""
+        return any(
+            "wengine_vpn_ticket" in c.name for c in self.session.cookies
+        )
+
     def _establish_session(self, ticket_url: str):
-        """Step 7: Follow the ticket URL to establish WebVPN session."""
+        """Step 7: Follow the ticket URL to establish WebVPN session.
+
+        A slow runner can lose the one-shot ticket to a read timeout; the
+        proxy then answers the retry by redirecting to its login page, which
+        still arrives as HTTP 200.  That is not a session, so a chain that
+        ends on the login page is rejected here and the caller logs in again
+        with a fresh ticket instead of failing later with a cold session.
+        """
         for attempt in range(3):
             try:
                 resp = self.session.get(
                     ticket_url, allow_redirects=True, timeout=20
                 )
                 if resp.status_code == 200:
-                    print("    Session established.")
+                    landed_on_login = any(
+                        _redirect_category(hop.headers.get("Location", ""))
+                        == "login"
+                        for hop in (resp.history or [])
+                    ) or _redirect_category(resp.url) == "login"
+                    if landed_on_login:
+                        raise RuntimeError(
+                            "WebVPN ticket was not accepted (portal "
+                            "redirected to login); a fresh login is needed"
+                        )
+                    print(
+                        "    Session established "
+                        f"(cookie={self._has_ticket_cookie()}, "
+                        f"hops={len(resp.history or [])})."
+                    )
                     return
                 raise RuntimeError(
                     f"Failed to establish WebVPN session (status={resp.status_code})"
                 )
             except requests.exceptions.Timeout:
-                has_ticket = any(
-                    "wengine_vpn_ticket" in c.name
-                    for c in self.session.cookies
-                )
-                if has_ticket:
+                if self._has_ticket_cookie():
                     print("    Session cookie set despite timeout.")
                     return
                 if attempt < 2:

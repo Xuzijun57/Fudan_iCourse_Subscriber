@@ -13,6 +13,7 @@ answering the password step with a pending second factor:
 """
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from src.api import webvpn
@@ -40,9 +41,10 @@ class FakeResponse:
 class FakeSession:
     """Records requests and replays queued responses."""
 
-    def __init__(self, responses):
+    def __init__(self, responses, cookies=()):
         self.responses = list(responses)
         self.calls = []
+        self.cookies = list(cookies)
         self.closed = False
 
     def post(self, url, **kwargs):
@@ -226,6 +228,47 @@ class RedirectClassificationTests(unittest.TestCase):
 
     def test_missing_location_is_not_a_portal(self):
         self.assertEqual(_redirect_category(""), "none")
+
+
+class SessionEstablishmentTests(unittest.TestCase):
+    """A ticket retry must not pass the login page off as a live session."""
+
+    @staticmethod
+    def response(status_code=200, url="https://webvpn.fudan.edu.cn/", hop=None):
+        history = [SimpleNamespace(headers={"Location": hop})] if hop else []
+        resp = SimpleNamespace(
+            status_code=status_code, url=url, history=history, headers={}
+        )
+        return resp
+
+    def test_portal_page_without_a_login_hop_is_accepted(self):
+        vpn = make_session([])
+        vpn.session.get = Mock(return_value=self.response())
+        vpn._establish_session("https://webvpn.fudan.edu.cn/ticket")
+        self.assertEqual(vpn.session.get.call_count, 1)
+
+    def test_redirect_to_login_is_rejected(self):
+        vpn = make_session([])
+        vpn.session.get = Mock(
+            return_value=self.response(hop="/login?cas_login=true")
+        )
+        with self.assertRaisesRegex(RuntimeError, "redirected to login"):
+            vpn._establish_session("https://webvpn.fudan.edu.cn/ticket")
+
+    def test_final_login_url_is_rejected(self):
+        vpn = make_session([])
+        vpn.session.get = Mock(
+            return_value=self.response(url="https://webvpn.fudan.edu.cn/login")
+        )
+        with self.assertRaisesRegex(RuntimeError, "redirected to login"):
+            vpn._establish_session("https://webvpn.fudan.edu.cn/ticket")
+
+    def test_timeout_with_a_ticket_cookie_still_counts_as_success(self):
+        vpn = make_session([])
+        vpn.session.get = Mock(side_effect=webvpn.requests.Timeout("slow"))
+        vpn._has_ticket_cookie = Mock(return_value=True)
+        vpn._establish_session("https://webvpn.fudan.edu.cn/ticket")
+        self.assertEqual(vpn.session.get.call_count, 1)
 
 
 class LoginRetryTests(unittest.TestCase):
