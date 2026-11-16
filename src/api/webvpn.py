@@ -238,6 +238,9 @@ class WebVPNSession:
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": config.USER_AGENT})
         self.logged_in = False
+        # Last TOTP window consumed by this session, so a retry after a later
+        # step failed never replays a code the server may already have used.
+        self._otp_window: int | None = None
 
     def login(self, student_id: str = None, password: str = None) -> bool:
         """Execute the full 7-step IDP authentication flow.
@@ -665,6 +668,20 @@ class WebVPNSession:
         print("    loginToken: OK")
         return login_token
 
+    def _next_otp_code(self) -> str:
+        """Return a TOTP code from a window this session has not used yet.
+
+        A login may be retried after the password step already succeeded, and
+        most TOTP servers reject a replayed code.  Waiting for the next window
+        keeps the retry legitimate instead of turning it into a rejection.
+        """
+        window = int(time.time()) // 30
+        if window == self._otp_window:
+            time.sleep(30 - time.time() % 30 + 0.5)
+            window = int(time.time()) // 30
+        self._otp_window = window
+        return totp_code(config.TOTP_SECRET)
+
     def _authenticate_totp(
         self,
         challenge: dict,
@@ -704,7 +721,7 @@ class WebVPNSession:
                 f"{','.join(offered)}; UIS_TOTP_SECRET is not configured. "
                 "Set it to the Base32 secret already bound to the account."
             )
-        code = totp_code(config.TOTP_SECRET)
+        code = self._next_otp_code()
         if via_vpn:
             base, origin = get_vpn_url(config.IDP_BASE), config.WEBVPN_BASE
         else:

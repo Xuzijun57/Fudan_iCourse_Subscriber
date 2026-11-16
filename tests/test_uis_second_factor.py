@@ -160,6 +160,23 @@ class TotpChallengeTests(unittest.TestCase):
                 )
         self.assertEqual(vpn.session.calls, [])
 
+    def test_a_retried_login_never_replays_the_same_window(self):
+        vpn = make_session([])
+        clock = {"t": 59.0}
+        fake = Mock()
+        fake.time.side_effect = lambda: clock["t"]
+
+        def _sleep(seconds):
+            clock["t"] += seconds
+
+        fake.sleep.side_effect = _sleep
+        with patch.object(webvpn.config, "TOTP_SECRET", RFC_KEY),                 patch.object(webvpn, "time", fake):
+            first = vpn._next_otp_code()
+            second = vpn._next_otp_code()
+        self.assertEqual(first, "287082")  # t=59
+        self.assertNotEqual(first, second)  # waited out the used window
+        self.assertEqual(second, totp_code(RFC_KEY, clock["t"]))
+
     def test_rejected_code_is_a_second_factor_error(self):
         vpn = make_session([FakeResponse({"code": 401, "message": "bad otp"})])
         with patch.object(webvpn.config, "TOTP_SECRET", RFC_KEY):

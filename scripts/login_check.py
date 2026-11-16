@@ -24,7 +24,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.runtime import config
 from src.api.icourse import ICourseClient
-from src.api.webvpn import SecondFactorError, WebVPNSession
+from src.api.webvpn import SecondFactorError
+# The probe deliberately reuses the production retry policy so it fails and
+# recovers exactly like a real run does.
+from main import login_with_retry
 
 
 def _configured(value: str) -> str:
@@ -41,12 +44,9 @@ def main() -> int:
         print("FAIL: StuId / UISPsw are not configured")
         return 1
 
+    print("\n[Step] WebVPN + iCourse CAS login (shared retry policy)")
     try:
-        vpn = WebVPNSession()
-        print("\n[Step] WebVPN login")
-        vpn.login()
-        print("[Step] iCourse CAS login")
-        vpn.authenticate_icourse()
+        vpn = login_with_retry(max_attempts=3)
     except SecondFactorError as exc:
         # Not retryable by design: the runner cannot invent the missing step.
         print(f"FAIL: second factor — {exc}")
