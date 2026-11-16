@@ -20,6 +20,36 @@ import base64
 from src.runtime import config
 
 
+def _icourse_login_token(data: dict) -> str:
+    """Read the authentication token without logging sensitive response values."""
+    if not isinstance(data, dict):
+        raise RuntimeError("Unexpected iCourse CAS response type")
+    code = str(data.get("code"))
+    safe_code = code if re.fullmatch(r"[0-9]{1,6}", code) else "unknown"
+    if code != "200":
+        raise RuntimeError(f"iCourse CAS auth failed (code={safe_code})")
+    details = data.get("data")
+    for fields in (data, details):
+        if isinstance(fields, dict):
+            token = fields.get("loginToken")
+            if isinstance(token, str) and token.strip():
+                return token
+    # Summarize the response shape without printing arbitrary keys or values.
+    signals = {
+        "challenge": ("captcha", "verifycode", "challenge", "mfa", "otp"),
+        "next_step": ("nextstep", "nextmodule", "authchain", "redirect"),
+        "message": ("message", "msg", "error"),
+    }
+    keys = [k.lower() for fields in (data, details) if isinstance(fields, dict)
+            for k, v in fields.items() if v]
+    hints = ",".join(label for label, names in signals.items()
+                     if any(name in key for name in names for key in keys)) or "none"
+    raise RuntimeError(
+        "No loginToken in iCourse CAS response "
+        f"(code={safe_code}, data_type={type(details).__name__}, response_fields={len(data)}, hints={hints})"
+    )
+
+
 def encrypt_host(hostname: str) -> str:
     """Encrypt hostname using AES-128-CFB for WebVPN URL encoding.
 
@@ -190,7 +220,7 @@ class WebVPNSession:
             config.WEBVPN_BASE + "/", allow_redirects=False, timeout=5,
         )
         if warmup.status_code != 200:
-            raise RuntimeError("WebVPN session cold — re-login needed")
+            raise RuntimeError(f"WebVPN portal did not confirm session (HTTP {warmup.status_code})")
 
         idp_vpn_base = get_vpn_url(config.IDP_BASE)
 
@@ -221,7 +251,7 @@ class WebVPNSession:
         if not lck:
             raise RuntimeError(
                 f"Failed to extract lck from CAS redirect chain "
-                f"(final URL: {resp.url[:120]})"
+                f"(HTTP {resp.status_code})"
             )
 
         entity_id = config.ICOURSE_BASE
@@ -296,16 +326,8 @@ class WebVPNSession:
             },
             timeout=60,
         )
-        data = resp.json()
-
-        if str(data.get("code")) != "200":
-            raise RuntimeError(
-                f"iCourse CAS auth failed (code={data.get('code')})"
-            )
-
-        login_token = data.get("loginToken", "")
-        if not login_token:
-            raise RuntimeError("No loginToken in iCourse CAS response")
+        resp.raise_for_status()
+        login_token = _icourse_login_token(resp.json())
         print("    loginToken: OK")
 
         # Step 6: Get CAS ticket (through WebVPN)
@@ -364,8 +386,7 @@ class WebVPNSession:
             except Exception:
                 pass
 
-        print("    Could not verify iCourse auth via API, proceeding...")
-        return True
+        raise RuntimeError(f"iCourse session verification failed (HTTP {resp.status_code})")
 
     def get(self, url: str, **kwargs) -> requests.Response:
         """GET request through WebVPN. Converts URL automatically."""
