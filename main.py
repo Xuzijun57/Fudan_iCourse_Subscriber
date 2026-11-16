@@ -308,9 +308,6 @@ def run():
         # Fall through — crawl-only mode is valid.
 
     db = Database()
-    corrected = db.sync_dates_from_sub()
-    if corrected:
-        print(f"  [Date] Synced {corrected} lecture date(s) from sub_title", flush=True)
     transcriber = Transcriber()
     summarizer = Summarizer() if config.COURSE_IDS else None
     emailer = Emailer() if (
@@ -318,6 +315,13 @@ def run():
     ) else None
 
     vpn = login_with_retry()
+
+    # Only touch the stored database after authentication succeeded.  Doing it
+    # earlier made a failed login leave the DB byte-different, so the publish
+    # step (if: always()) committed an "update" that contained no new notes.
+    corrected = db.sync_dates_from_sub()
+    if corrected:
+        print(f"  [Date] Synced {corrected} lecture date(s) from sub_title", flush=True)
     client = ICourseClient(vpn)
     email_items: list = []
 

@@ -272,6 +272,20 @@ class SessionEstablishmentTests(unittest.TestCase):
 
 
 class LoginRetryTests(unittest.TestCase):
+    def test_a_failed_login_does_not_touch_the_database(self):
+        """A publish step runs even after a failed run, so nothing may change."""
+        try:
+            import main
+        except ImportError as exc:  # optional heavy deps (sherpa-onnx, ...)
+            self.skipTest(f"main import unavailable: {exc}")
+        db = Mock()
+        with patch.object(main, "Reporter"), patch.object(main, "Database",
+                                                          return_value=db),                 patch.object(main, "Transcriber"), patch.object(main, "Summarizer"),                 patch.object(main, "Emailer"),                 patch.object(main, "login_with_retry",
+                             side_effect=SecondFactorError("needs TOTP")):
+            with self.assertRaises(SecondFactorError):
+                main.run()
+        self.assertEqual(db.sync_dates_from_sub.call_count, 0)
+
     def test_second_factor_failure_is_not_retried(self):
         try:
             import main
