@@ -33,6 +33,13 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
+      # Two existing media tests shell out to ffmpeg, so the suite needs it to
+      # stay green here.  No ASR/OCR models are downloaded by this workflow.
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
       - name: Run tests
         run: python -m unittest discover -s tests -v
 
