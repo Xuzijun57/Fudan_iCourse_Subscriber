@@ -698,6 +698,12 @@ class WebVPNSession:
             raise SecondFactorError(
                 "Second-factor challenge is missing requestNumber"
             )
+        if not config.TOTP_SECRET:
+            raise SecondFactorError(
+                "UIS asks for a second factor and offers "
+                f"{','.join(offered)}; UIS_TOTP_SECRET is not configured. "
+                "Set it to the Base32 secret already bound to the account."
+            )
         code = totp_code(config.TOTP_SECRET)
         if via_vpn:
             base, origin = get_vpn_url(config.IDP_BASE), config.WEBVPN_BASE
