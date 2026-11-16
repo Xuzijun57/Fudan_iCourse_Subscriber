@@ -2,6 +2,10 @@ import os
 
 STUDENT_ID = os.environ.get("StuId", "")
 PASSWORD = os.environ.get("UISPsw", "")
+# Optional UIS second factor (动态口令): the Base32 secret already bound to the
+# account, not a one-time code.  Empty means "not configured", which makes the
+# login fail fast with an actionable message instead of retrying forever.
+TOTP_SECRET = os.environ.get("UIS_TOTP_SECRET", "").strip()
 
 WEBVPN_BASE = "https://webvpn.fudan.edu.cn"
 IDP_BASE = "https://id.fudan.edu.cn"

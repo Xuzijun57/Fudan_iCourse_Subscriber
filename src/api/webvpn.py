@@ -7,8 +7,10 @@ Handles:
 """
 
 import html as html_mod
+import hmac
 import re
-from binascii import hexlify, unhexlify
+import time
+from binascii import Error as Base32Error, hexlify, unhexlify
 from urllib.parse import urlparse, urlencode, quote, urljoin
 
 import requests
@@ -18,6 +20,88 @@ from Crypto.Cipher import PKCS1_v1_5
 import base64
 
 from src.runtime import config
+
+
+class SecondFactorError(RuntimeError):
+    """UIS asked for a second factor; repeating the password step cannot help."""
+
+
+# Fields the UIS unified authentication may use to describe a pending step.
+# Only whether they are present, and the step codes, are ever reported: values
+# can carry challenge material and never leave this process.
+_CHALLENGE_FIELDS = (
+    "second", "moduleCodes", "requestNumber", "authChainCode", "userName",
+    "nextStep", "nextModule", "redirectUrl", "verifyCode", "captcha",
+    "phone", "email", "otpCode",
+)
+
+
+def totp_code(secret: str, timestamp: float | None = None) -> str:
+    """Generate the six-digit HMAC-SHA1 TOTP (RFC 6238) for a bound secret."""
+    normalized = "".join(secret.split()).upper().rstrip("=")
+    if not normalized:
+        raise SecondFactorError(
+            "UIS requires a second factor but UIS_TOTP_SECRET is not configured; "
+            "set it to the Base32 secret already bound to the account"
+        )
+    try:
+        key = base64.b32decode(normalized + "=" * (-len(normalized) % 8))
+    except (Base32Error, ValueError):
+        raise SecondFactorError(
+            "UIS_TOTP_SECRET is not a valid Base32 TOTP secret"
+        ) from None
+    counter = int((time.time() if timestamp is None else timestamp) // 30)
+    digest = hmac.digest(key, counter.to_bytes(8, "big"), "sha1")
+    offset = digest[-1] & 0x0F
+    number = int.from_bytes(digest[offset:offset + 4], "big") & 0x7FFFFFFF
+    return f"{number % 1_000_000:06d}"
+
+
+def _second_factor_challenge(data: dict) -> dict | None:
+    """Return the response when it announces a pending second-factor step."""
+    if not isinstance(data, dict):
+        return None
+    if data.get("second"):
+        return data
+    modules = data.get("moduleCodes")
+    if isinstance(modules, list) and modules:
+        return data
+    return None
+
+
+def _describe_challenge(data: dict) -> str:
+    """Summarize a pending step without echoing values or credentials."""
+    present = [f for f in _CHALLENGE_FIELDS if data.get(f)]
+    modules = data.get("moduleCodes")
+    offered = (
+        ",".join(sorted(m for m in modules if isinstance(m, str)))
+        if isinstance(modules, list) else "none"
+    )
+    # Step module codes (e.g. userAndOtp) are protocol constants, not secrets.
+    return f"fields={','.join(present) or 'none'}, modules={offered or 'none'}"
+
+
+def _redirect_category(location: str) -> str:
+    """Classify a redirect target by host and path only, never by value.
+
+    Returns "portal" for a same-host, non-login destination, "login" for the
+    WebVPN login page, "external" for another host and "none" when the server
+    sent no Location.  Query strings are dropped so nothing sensitive leaks.
+    """
+    if not location:
+        return "none"
+    try:
+        parsed = urlparse(location)
+    except ValueError:
+        return "unparsed"
+    host = (parsed.hostname or "").lower()
+    path = (parsed.path or "/").lower()
+    vpn_host = (urlparse(config.WEBVPN_BASE).hostname or "").lower()
+    if host and host != vpn_host:
+        return "external"
+    if "login" in path:
+        return "login"
+    return "portal"
 
 
 def _icourse_login_token(data: dict) -> str:
@@ -34,6 +118,11 @@ def _icourse_login_token(data: dict) -> str:
             token = fields.get("loginToken")
             if isinstance(token, str) and token.strip():
                 return token
+    if _second_factor_challenge(data) is not None:
+        raise SecondFactorError(
+            "UIS asked for an unfinished second factor instead of a login token "
+            f"({_describe_challenge(data)})"
+        )
     # Summarize the response shape without printing arbitrary keys or values.
     signals = {
         "challenge": ("captcha", "verifycode", "challenge", "mfa", "otp"),
@@ -213,13 +302,22 @@ class WebVPNSession:
 
         print("[*] Starting iCourse CAS authentication through WebVPN...")
 
-        # Pre-flight: probe the WebVPN portal.  A cold session redirects to
-        # /login instantly (status 302); a hot session returns 200.  Fail
-        # fast on cold — login_with_retry() in main.py will re-login.
+        # Pre-flight: probe the WebVPN portal so a dead session fails fast.
+        # The bare root can answer 302 even for an authenticated session, so
+        # classify the redirect instead of treating every 302 as a dead
+        # session; the authenticated calls below decide success either way.
         warmup = self.session.get(
-            config.WEBVPN_BASE + "/", allow_redirects=False, timeout=5,
+            config.WEBVPN_BASE + "/", allow_redirects=False, timeout=15,
         )
-        if warmup.status_code != 200:
+        if warmup.status_code in (301, 302, 303, 307, 308):
+            category = _redirect_category(warmup.headers.get("Location", ""))
+            if category != "portal":
+                raise RuntimeError(
+                    "WebVPN session cold — portal redirect category: "
+                    f"{category}"
+                )
+            print(f"    Portal answered {warmup.status_code} (portal redirect)")
+        elif warmup.status_code != 200:
             raise RuntimeError(f"WebVPN portal did not confirm session (HTTP {warmup.status_code})")
 
         idp_vpn_base = get_vpn_url(config.IDP_BASE)
@@ -327,7 +425,13 @@ class WebVPNSession:
             timeout=60,
         )
         resp.raise_for_status()
-        login_token = _icourse_login_token(resp.json())
+        result = resp.json()
+        if _second_factor_challenge(result) is not None:
+            result = self._authenticate_totp(
+                result, student_id, lck, entity_id, auth_chain_code,
+                request_type, via_vpn=True,
+            )
+        login_token = _icourse_login_token(result)
         print("    loginToken: OK")
 
         # Step 6: Get CAS ticket (through WebVPN)
@@ -548,6 +652,11 @@ class WebVPNSession:
                 f"Authentication failed (code={data.get('code')})"
             )
 
+        if _second_factor_challenge(data) is not None:
+            data = self._authenticate_totp(
+                data, student_id, lck, entity_id, auth_chain_code,
+                request_type,
+            )
         # loginToken is at top level, not nested under "data"
         login_token = data.get("loginToken", "")
         if not login_token:
@@ -555,6 +664,86 @@ class WebVPNSession:
 
         print("    loginToken: OK")
         return login_token
+
+    def _authenticate_totp(
+        self,
+        challenge: dict,
+        student_id: str,
+        lck: str,
+        entity_id: str,
+        auth_chain_code: str,
+        request_type: str,
+        *,
+        via_vpn: bool = False,
+    ) -> dict:
+        """Finish a pending second-factor step with the bound TOTP secret.
+
+        UIS accepts the password and then answers ``second: true`` with the
+        modules still required; completing that step is the officially
+        supported flow.  Anything the runner cannot satisfy itself (an
+        unbound step, a wrong secret, a further prompt) raises
+        SecondFactorError so the caller stops retrying the password.
+        """
+        modules = challenge.get("moduleCodes")
+        offered = sorted(m for m in modules if isinstance(m, str)) \
+            if isinstance(modules, list) else []
+        if "userAndOtp" not in offered:
+            raise SecondFactorError(
+                "UIS requires a second factor this runner cannot complete "
+                f"(offered modules: {','.join(offered) or 'none'}); "
+                "bind 动态口令 in UIS so TOTP is available"
+            )
+        request_number = challenge.get("requestNumber")
+        if not request_number:
+            raise SecondFactorError(
+                "Second-factor challenge is missing requestNumber"
+            )
+        code = totp_code(config.TOTP_SECRET)
+        if via_vpn:
+            base, origin = get_vpn_url(config.IDP_BASE), config.WEBVPN_BASE
+        else:
+            base, origin = config.IDP_BASE, config.IDP_BASE
+        print("[Login] Completing UIS second factor with TOTP...")
+        try:
+            resp = self.session.post(
+                f"{base}/idp/authn/authExecute",
+                json={
+                    "authModuleCode": "userAndOtp",
+                    "authChainCode": challenge.get("authChainCode")
+                    or auth_chain_code,
+                    "entityId": entity_id,
+                    "requestNumber": request_number,
+                    "requestType": request_type,
+                    "lck": lck,
+                    "authPara": {
+                        "loginName": challenge.get("userName") or student_id,
+                        "otpCode": code,
+                    },
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Referer": f"{base}/ac/",
+                    "Origin": origin,
+                },
+                timeout=60,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except (requests.RequestException, ValueError) as exc:
+            raise SecondFactorError(
+                f"TOTP request failed ({type(exc).__name__}); retries stopped"
+            ) from None
+        if not isinstance(data, dict) or str(data.get("code")) != "200":
+            raise SecondFactorError(
+                "TOTP was rejected; check the bound secret and the runner clock"
+            )
+        if _second_factor_challenge(data) is not None:
+            raise SecondFactorError(
+                "TOTP accepted the code but a further step is required "
+                f"({_describe_challenge(data)})"
+            )
+        print("[Login] TOTP accepted.")
+        return data
 
     def _get_cas_ticket(self, login_token: str) -> str:
         """Step 6: Exchange loginToken for a CAS ticket URL."""
