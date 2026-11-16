@@ -154,7 +154,7 @@ class TotpChallengeTests(unittest.TestCase):
         vpn = make_session([])
         with patch.object(webvpn.config, "TOTP_SECRET", ""):
             with self.assertRaisesRegex(
-                SecondFactorError, "userAndOtp; UIS_TOTP_SECRET is not configured"
+                SecondFactorError, "userAndOtp .*UIS_TOTP_SECRET is not configured"
             ):
                 vpn._authenticate_totp(
                     dict(CHALLENGE), "tester", "lck", "entity", "chain",

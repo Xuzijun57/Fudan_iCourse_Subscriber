@@ -718,8 +718,9 @@ class WebVPNSession:
         if not config.TOTP_SECRET:
             raise SecondFactorError(
                 "UIS asks for a second factor and offers "
-                f"{','.join(offered)}; UIS_TOTP_SECRET is not configured. "
-                "Set it to the Base32 secret already bound to the account."
+                f"{','.join(offered)} ({_describe_challenge(challenge)}); "
+                "UIS_TOTP_SECRET is not configured. Set it to the Base32 "
+                "secret already bound to the account."
             )
         code = self._next_otp_code()
         if via_vpn:
