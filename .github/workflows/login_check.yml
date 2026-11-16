@@ -1,0 +1,45 @@
+name: iCourse Login Check
+
+# Minimal login probe: proves the school side of a run (WebVPN, iCourse CAS,
+# course API, course enumeration) without ASR models, ffmpeg, lecture
+# processing, database publishing or email.  Use it to tell a login regression
+# apart from a pipeline problem in about a minute instead of a full run.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  login-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache Python packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.pythonLocation }}/lib/python*/site-packages
+          key: pip-login-check-${{ hashFiles('requirements.txt') }}
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Check school login and course enumeration
+        env:
+          StuId: ${{ secrets.STUID }}
+          UISPsw: ${{ secrets.UISPSW }}
+          UIS_TOTP_SECRET: ${{ secrets.UIS_TOTP_SECRET }}
+          COURSE_IDS: ${{ secrets.COURSE_IDS }}
+        run: python -u scripts/login_check.py
